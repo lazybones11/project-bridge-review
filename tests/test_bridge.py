@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sqlite3
 import shutil
@@ -143,6 +144,21 @@ class BridgeTests(unittest.TestCase):
         self.assertIsNone(rows[0]["cwd"])
         self.assertEqual(db_path.read_bytes(), before)
 
+    def test_null_index_title_and_timestamp_do_not_crash_lookup(self):
+        (self.home / "state_5.sqlite").unlink()
+        rows = [
+            {"id": THREAD, "thread_name": None, "updated_at": None},
+            {"id": "other", "thread_name": "有标题", "updated_at": "2026-10-02"},
+        ]
+        (self.home / "session_index.jsonl").write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf-8"
+        )
+        found, backend = bridge.thread_rows(self.home)
+        self.assertEqual(backend, "local_index")
+        self.assertEqual([row["id"] for row in found], ["other", THREAD])
+        self.assertEqual((found[1]["title"], found[1]["updated_at"]), ("", ""))
+        self.assertEqual([row["id"] for row in bridge.thread_rows(self.home, query="标题")[0]], ["other"])
+
     def test_exact_source_unicode_hashes_and_traversal(self):
         project = self.root / "中文源码"
         project.mkdir()
@@ -171,6 +187,23 @@ class BridgeTests(unittest.TestCase):
             bridge.code_excerpt(args)
 
     @unittest.skipUnless(shutil.which("git"), "git unavailable")
+    def test_code_rejects_common_sensitive_paths_before_reading(self):
+        sample = "synthetic-contents-not-for-output"
+        project = self.root / "project"
+        project.mkdir()
+        for name in (".ENV.local", "config/identity.pem", ".git/config", ".ssh/config", "credentials.json"):
+            target = project / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(sample, encoding="utf-8")
+            command = [sys.executable, "-X", "utf8", str(SCRIPT), "code", "--root", str(project),
+                       "--file", name, "--start", "1", "--end", "1"]
+            with self.subTest(path=name):
+                result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8")
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(json.loads(result.stderr)["status"], "error")
+                self.assertIn("sensitive source", result.stderr)
+                self.assertNotIn(sample, result.stdout + result.stderr)
+
     def test_git_nested_root_reports_actual_dirty_file(self):
         repo = self.root / "repo"
         repo.mkdir()
@@ -189,6 +222,36 @@ class BridgeTests(unittest.TestCase):
         dirty = bridge.git_metadata(child, source)
         self.assertIn("src/sample.py", dirty["file_status"])
         self.assertIn("M", dirty["file_status"])
+
+    @unittest.skipUnless(shutil.which("git"), "git unavailable")
+    def test_git_metadata_keeps_index_and_disables_fsmonitor(self):
+        repo = self.root / "read-only-git"
+        repo.mkdir()
+        def run(*command):
+            subprocess.run(["git", "-C", str(repo), *command], check=True, capture_output=True)
+        run("init", "--template=")
+        run("config", "user.email", "fixture@example.invalid")
+        run("config", "user.name", "Fixture")
+        run("config", "commit.gpgsign", "false")
+        source = repo / "fixture.txt"
+        source.write_bytes(b"unchanged content\n")
+        run("add", "--", "fixture.txt")
+        run("commit", "-m", "fixture")
+        index = repo / ".git/index"
+        stat = source.stat()
+        os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000_000))
+        before = index.read_bytes()
+        self.assertEqual(bridge.git_metadata(repo, source)["file_status"], "")
+        self.assertEqual(index.read_bytes(), before)
+
+        hook = repo / ".git/fixture-fsmonitor.sh"
+        marker = repo / ".git/fixture-invoked"
+        hook.write_bytes(b"#!/bin/sh\nprintf invoked > .git/fixture-invoked\nprintf 'fixture\\0'\n")
+        hook.chmod(0o755)
+        run("config", "core.fsmonitor", ".git/fixture-fsmonitor.sh")
+        self.assertEqual(bridge.git_metadata(repo, source)["file_status"], "")
+        self.assertFalse(marker.exists(), "repository fsmonitor unexpectedly ran")
+        self.assertEqual(index.read_bytes(), before)
 
     def test_packet_exclusive_create_and_cli_failure(self):
         packet = self.root / "片段包" / "sample.json"

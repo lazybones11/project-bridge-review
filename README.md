@@ -4,13 +4,13 @@
 
 Bring selected chat excerpts, conclusions, and local source code from another project into the current Codex session, with provenance and without exporting the full history.
 
-仓库：[project-bridge](https://github.com/lazybones11/project-bridge)。项目包含一个 Codex 技能和一个 Python 只读助手。
+仓库：[project-bridge](https://github.com/lazybones11/project-bridge-review)。项目包含一个 Codex 技能和一个 Python 只读助手。它是独立社区项目，与 OpenAI 无关联，也不是 OpenAI 官方项目。
 
 ## 适用环境与兼容性
 
 本地后备读取依赖 Codex 桌面版未公开的记录格式：`state_*.sqlite` 的 `threads` 表、rollout JSONL，以及用于后备查询的 `session_index.jsonl`。这些格式可能随 Codex 更新改变。没有可用数据源或读取时遇到不兼容结构，会报告 `status: error` 并以退出码 2 结束；工具不会伪造读取结果。
 
-已验证环境：Windows、Python 3.13，Codex 桌面版 2026 年 10 月使用的记录格式。当前版本的回归测试使用合成记录；未验证 Linux、macOS、其他 Codex 版本或远程聊天。Python 助手只使用标准库，无需通过 pip 安装依赖。
+Python 助手只使用标准库，要求 Python 3.9 或更新版本，无需通过 pip 安装依赖。本次在 Windows / Python 3.13 上用合成数据回归；Python 3.9 是最低 API 要求，未在 3.9 解释器上实测。本地真实记录曾在 Windows 版 Codex 上验证，具体桌面应用版本未记录。Linux、macOS、其他 Codex 版本和远程聊天仍未验证。详见 [本地记录格式](docs/FORMAT.md)。
 
 ## 安装
 
@@ -41,12 +41,14 @@ python -X utf8 .\project-bridge\scripts\bridge.py threads --query '跨项目' --
 ## 当前边界
 
 - 优先使用宿主的项目和聊天工具；本地记录解析是兼容性后备方式，可能随 Codex 格式变化而需要维护。
-- 只提取选定来源的可见用户与助手文本，不导出隐藏推理、系统消息或整段历史。
+- 只提取选定来源的可见用户与助手文本，不导出隐藏推理、系统消息或整段历史。**输入片段、源码与来源路径默认不脱敏**；可能包含敏感内容，分享前请检查，不要把片段包提交到 Git。
 - 源码引用包含路径、行号、内容哈希，以及可获取的 Git 信息；这些信息不保证内容结论正确。
 - 本地路径与本地记录不能代表远程、云端、其他账号或其他主机的可访问状态。
 - 当前不新增侧栏原生按钮，也没有常驻服务。
 
 WorkBuddy 适配、跨工具自动派任务和插件市场发布尚未实现。
+
+`code` 需要具体的项目目录，默认拒绝用户主目录、卷根目录，以及常见密钥、凭据和 Git 内部路径（例如 `.env`、`*.pem` 和 `.git/config`）。这些规则用来降低误读风险，不能识别任意文件正文里的秘密。Git 元数据仍依赖本机 Git，仅对受信任的仓库使用。
 
 ## 许可证
 

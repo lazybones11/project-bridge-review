@@ -73,8 +73,9 @@ def thread_rows(home, query="", project="", limit=10, thread=None):
     for _, row in records(index):
         identifier = row.get("id")
         if identifier:
-            latest[identifier] = {"id": identifier, "title": row.get("thread_name", ""),
-                                  "cwd": None, "updated_at": row.get("updated_at", "")}
+            title, updated_at = row.get("thread_name"), row.get("updated_at")
+            latest[identifier] = {"id": identifier, "title": title if isinstance(title, str) else "",
+                                  "cwd": None, "updated_at": updated_at if isinstance(updated_at, str) else ""}
     rows = [r for r in latest.values() if (not thread or r["id"] == thread)
             and query.casefold() in r["title"].casefold()]
     if project:
@@ -197,33 +198,52 @@ def excerpt(args, home):
 
 
 def git_metadata(root, path):
-    def run(*command):
-        result = subprocess.run(["git", "-C", str(root), *command], capture_output=True, text=True,
-                                encoding="utf-8", errors="replace", timeout=5)
+    def run(directory, *command):
+        result = subprocess.run(
+            ["git", "--no-optional-locks", "--literal-pathspecs", "-c", "core.fsmonitor=false",
+             "-C", str(directory), *command],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+            env=dict(os.environ, GIT_NO_LAZY_FETCH="1"),
+        )
         return result.stdout.strip() if result.returncode == 0 else None
     try:
-        top = run("rev-parse", "--show-toplevel")
+        top = run(root, "rev-parse", "--show-toplevel")
         if not top:
             return None
-        origin = run("remote", "get-url", "origin")
+        origin = run(top, "remote", "get-url", "origin")
         if origin and "://" in origin:
             parts = urlsplit(origin)
             origin = urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
         relative = path.relative_to(Path(top).resolve()).as_posix()
-        state_result = subprocess.run(["git", "-C", top, "status", "--porcelain", "--", relative],
-                                      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
-        state = state_result.stdout.strip() if state_result.returncode == 0 else None
-        return {"root": top, "commit": run("rev-parse", "HEAD"), "origin": origin,
+        state = run(top, "status", "--porcelain", "--ignore-submodules=all", "--", relative)
+        return {"root": top, "commit": run(top, "rev-parse", "HEAD"), "origin": origin,
                 "file_status": state, "working_copy": True}
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
 
 
+def sensitive_source(relative):
+    parts = tuple(part.rstrip(" .").casefold() for part in relative.parts)
+    name = parts[-1]
+    return (
+        any(part in {".git", ".ssh", ".aws", ".gnupg"} for part in parts)
+        or name.startswith((".env", "id_rsa", "id_ed25519", "credentials"))
+        or name.endswith((".pem", ".key"))
+        or name in {".npmrc", ".pypirc", ".netrc", ".git-credentials"}
+    )
+
+
 def code_excerpt(args):
     root = Path(args.root).resolve(strict=True)
-    path = (root / args.file).resolve(strict=True)
+    requested = root / args.file
+    path = requested.resolve(strict=True)
     if not root.is_dir() or not path.is_relative_to(root) or not path.is_file():
         raise ValueError("Source file must resolve inside the specified project root")
+    if root == Path(root.anchor) or root == Path.home().resolve():
+        raise ValueError("Choose a project directory; the filesystem root and user home are too broad")
+    lexical = Path(os.path.abspath(requested))
+    if sensitive_source(path) or sensitive_source(lexical):
+        raise ValueError("Reading this sensitive source path is not supported")
     if args.start < 1 or args.end < args.start or args.end - args.start + 1 > 1000:
         raise ValueError("Choose a valid 1-based line range of at most 1000 lines")
     data = path.read_bytes()
