@@ -159,6 +159,50 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual((found[1]["title"], found[1]["updated_at"]), ("", ""))
         self.assertEqual([row["id"] for row in bridge.thread_rows(self.home, query="标题")[0]], ["other"])
 
+    @unittest.skipUnless(os.name == "nt", "Windows extended-length prefix")
+    def test_extended_length_rollout_path_is_normalized(self):
+        prefix = "\\\\?\\"
+        conn = sqlite3.connect(self.home / "state_5.sqlite")
+        conn.execute("UPDATE threads SET rollout_path=?", (prefix + str(self.path),))
+        conn.commit()
+        conn.close()
+        path, meta = bridge.rollout(self.home, THREAD)
+        self.assertEqual(path, self.path.resolve())
+        self.assertEqual(meta["id"], THREAD)
+
+    def test_outside_home_rollout_path_is_skipped_for_directory_fallback(self):
+        outside = self.root / "outside" / f"rollout-{THREAD}.jsonl"
+        outside.parent.mkdir()
+        shutil.copy(self.path, outside)
+        conn = sqlite3.connect(self.home / "state_5.sqlite")
+        conn.execute("UPDATE threads SET rollout_path=?", (str(outside),))
+        conn.commit()
+        conn.close()
+        path, _ = bridge.rollout(self.home, THREAD)
+        self.assertEqual(path, self.path.resolve())
+        self.assertNotEqual(path, outside.resolve())
+
+    def test_agent_instruction_blocks_are_trimmed_and_flagged(self):
+        def row(identifier, text):
+            return {"type": "response_item", "timestamp": "2026-10-02T10:00:00Z",
+                    "payload": {"type": "message", "id": identifier, "role": "user",
+                                "content": [{"type": "output_text", "text": text}]}}
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row("inj1", "# AGENTS.md instructions\n\n<INSTRUCTIONS>\n注入的规则\n</INSTRUCTIONS>"), ensure_ascii=False) + "\n")
+            stream.write(json.dumps(row("m5", "我自己开头的话\n<INSTRUCTIONS>\n包裹材料\n</INSTRUCTIONS>\n我自己结尾的话"), ensure_ascii=False) + "\n")
+        messages = bridge.visible_messages(self.path)
+        self.assertEqual([m["message_id"] for m in messages], ["m1", "m2", "m3", "m4", "m5"])
+        joined = "\n".join(m["text"] for m in messages)
+        self.assertNotIn("注入的规则", joined)
+        self.assertNotIn("包裹材料", joined)
+        fifth = next(m for m in messages if m["message_id"] == "m5")
+        self.assertTrue(fifth["injected"])
+        self.assertIn("我自己开头的话", fifth["text"])
+        self.assertIn("我自己结尾的话", fifth["text"])
+        self.assertTrue(all(not m["injected"] for m in messages if m["message_id"] != "m5"))
+        result = bridge.excerpt(self.args(query="注入的规则"), self.home)
+        self.assertEqual(result["status"], "no_match")
+
     def test_exact_source_unicode_hashes_and_traversal(self):
         project = self.root / "中文源码"
         project.mkdir()

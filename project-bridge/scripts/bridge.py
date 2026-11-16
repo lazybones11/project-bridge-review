@@ -83,26 +83,52 @@ def thread_rows(home, query="", project="", limit=10, thread=None):
     return sorted(rows, key=lambda r: r["updated_at"], reverse=True)[:limit], "local_index"
 
 
+def plain_path(value):
+    """Normalize a recorded path: the Windows extended-length prefix defeats containment checks."""
+    if not isinstance(value, str):
+        return Path(value)
+    if value.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + value[8:])
+    if value.startswith("\\\\?\\"):
+        return Path(value[4:])
+    return Path(value)
+
+
+def verified_rollout(path, identifier, home):
+    """Resolve one candidate; return it with session metadata only when it is
+    inside the Codex home and its session_meta identity matches."""
+    if not path.is_file():
+        return None
+    resolved = path.resolve()
+    if not resolved.is_relative_to(home.resolve()):
+        return None  # Recorded paths outside the Codex home are never read.
+    first = next(records(resolved), None)
+    meta = first[1].get("payload", {}) if first else {}
+    if first and first[1].get("type") == "session_meta" and meta.get("id", meta.get("session_id")) == identifier:
+        return resolved, meta
+    return None
+
+
 def rollout(home, identifier):
     if not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", identifier):
         raise ValueError("Use the full UUID thread ID from the thread listing")
     rows, _ = thread_rows(home, thread=identifier, limit=1)
     candidates = []
     if rows and rows[0].get("rollout_path"):
-        candidates.append(Path(rows[0]["rollout_path"]))
-    for directory in (home / "sessions", home / "archived_sessions"):
-        if not candidates or not candidates[0].is_file():
-            candidates.extend(directory.rglob(f"*{identifier}.jsonl"))
+        candidates.append(plain_path(rows[0]["rollout_path"]))
     for path in candidates:
-        if not path.is_file():
+        verified = verified_rollout(path, identifier, home)
+        if verified:
+            resolved, meta = verified
+            return resolved, rows[0] if rows else {"id": identifier, "cwd": meta.get("cwd")}
+    for directory in (home / "sessions", home / "archived_sessions"):
+        if not directory.is_dir():
             continue
-        path = path.resolve()
-        if not path.is_relative_to(home.resolve()):
-            raise ValueError("Rollout path is outside the selected Codex home")
-        first = next(records(path), None)
-        meta = first[1].get("payload", {}) if first else {}
-        if first and first[1].get("type") == "session_meta" and meta.get("id", meta.get("session_id")) == identifier:
-            return path, rows[0] if rows else {"id": identifier, "cwd": meta.get("cwd")}
+        for found in directory.rglob(f"*{identifier}.jsonl"):
+            verified = verified_rollout(found, identifier, home)
+            if verified:
+                resolved, meta = verified
+                return resolved, rows[0] if rows else {"id": identifier, "cwd": meta.get("cwd")}
     raise ValueError("Selected thread has no readable, identity-verified local rollout")
 
 
@@ -113,8 +139,15 @@ def text_blocks(payload):
                      and isinstance(block.get("text"), str))
 
 
+RUNTIME_BLOCK = re.compile(
+    r"<(environment_context|external_codex_apps_open_page|INSTRUCTIONS)>.*?</\1>", re.S)
+AGENTS_HEADER = re.compile(r"^\s*#\s*AGENTS\.md\s+instructions\s*$", re.IGNORECASE)
+
+
 def clean_runtime_blocks(content):
-    return re.sub(r"<(environment_context|external_codex_apps_open_page)>.*?</\1>", "", content, flags=re.S).strip()
+    stripped = RUNTIME_BLOCK.sub("", content)
+    # A residual wrapper header line (e.g. "# AGENTS.md instructions") is scaffolding, not chat.
+    return "\n".join(line for line in stripped.splitlines() if not AGENTS_HEADER.match(line)).strip()
 
 
 def visible_messages(path, diagnostics=None):
@@ -127,9 +160,10 @@ def visible_messages(path, diagnostics=None):
             role = payload.get("role")
             if role not in ("user", "assistant") or payload.get("channel") == "analysis" or payload.get("phase") == "analysis":
                 continue
-            content = text_blocks(payload)
+            raw = text_blocks(payload)
+            injected = bool(RUNTIME_BLOCK.search(raw)) or bool(AGENTS_HEADER.search(raw))
             # Runtime blocks are not conversation material; never export base instructions.
-            content = clean_runtime_blocks(content)
+            content = clean_runtime_blocks(raw)
             if not content:
                 continue
             message_id = payload.get("id") or f"line-{line}"
@@ -137,16 +171,18 @@ def visible_messages(path, diagnostics=None):
                 continue
             seen.add(message_id)
             primary.append({"message_id": message_id, "role": role, "timestamp": row.get("timestamp"),
-                            "source_line": line, "text": content})
+                            "source_line": line, "text": content, "injected": injected})
         elif row.get("type") == "event_msg" and payload.get("type") in ("user_message", "agent_message"):
-            content = payload.get("message")
-            if isinstance(content, str) and content.strip():
-                content = clean_runtime_blocks(content)
+            raw = payload.get("message")
+            if isinstance(raw, str) and raw.strip():
+                injected = bool(RUNTIME_BLOCK.search(raw)) or bool(AGENTS_HEADER.search(raw))
+                content = clean_runtime_blocks(raw)
                 if not content:
                     continue
                 legacy.append({"message_id": f"line-{line}",
                                "role": "user" if payload["type"] == "user_message" else "assistant",
-                               "timestamp": row.get("timestamp"), "source_line": line, "text": content})
+                               "timestamp": row.get("timestamp"), "source_line": line,
+                               "text": content, "injected": injected})
     roles = {r["role"] for r in primary}
     return sorted(primary + [r for r in legacy if r["role"] not in roles], key=lambda r: r["source_line"])
 
