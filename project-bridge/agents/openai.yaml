@@ -1,0 +1,6 @@
+interface:
+  display_name: "跨项目片段桥"
+  short_description: "从另一项目或聊天按需取片段与源码，保留来源，减少重复搬运上下文"
+  default_prompt: "使用 $project-bridge，从另一个项目的指定聊天提取当前任务需要的片段或源码，并保留来源。"
+policy:
+  allow_implicit_invocation: true

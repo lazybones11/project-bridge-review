@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+片段包/
+本机备份/
+本机记录/
+.DS_Store
+Thumbs.db
