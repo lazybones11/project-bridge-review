@@ -203,6 +203,56 @@ class BridgeTests(unittest.TestCase):
         result = bridge.excerpt(self.args(query="注入的规则"), self.home)
         self.assertEqual(result["status"], "no_match")
 
+    def test_excerpt_preserves_runtime_marker_examples_in_code(self):
+        examples = (
+            "讨论 `<INSTRUCTIONS>示例</INSTRUCTIONS>` 的用法",
+            "````xml\r\n```\r\n# AGENTS.md instructions\r\n"
+            "<INSTRUCTIONS>\r\n示例正文\u2028仍是原文\r\n</INSTRUCTIONS>\r\n````",
+            "~~~md\n<environment_context>示例正文</environment_context>\n~~~",
+            "    <INSTRUCTIONS>\n    示例正文\n    </INSTRUCTIONS>",
+        )
+        with self.path.open("a", encoding="utf-8") as stream:
+            for index, text in enumerate(examples):
+                stream.write(json.dumps({
+                    "type": "response_item",
+                    "payload": {"type": "message", "id": f"example-{index}", "role": "user",
+                                "content": [{"type": "input_text", "text": f"示例原文\n{text}\n结束"}]},
+                }, ensure_ascii=False) + "\n")
+        for index, text in enumerate(examples):
+            with self.subTest(example=index):
+                result = bridge.excerpt(self.args(query=None, messages=[f"example-{index}"],
+                                                  context=0, max_chars=1000), self.home)
+                message = result["messages"][0]
+                self.assertEqual(message["text"], f"示例原文\n{text}\n结束")
+                self.assertFalse(message["injected"])
+
+    def test_excerpt_removes_nested_rules_with_legacy_event(self):
+        text = ("保留开头\n<INSTRUCTIONS>\n外层机密甲\n<INSTRUCTIONS>\n内层机密\n"
+                "</INSTRUCTIONS>\n外层机密乙\n</INSTRUCTIONS>\n保留结尾")
+        rows = [
+            {"type": "session_meta", "payload": {"id": THREAD}},
+            {"type": "event_msg", "payload": {"type": "user_message", "message": text}},
+            {"type": "event_msg", "payload": {"type": "agent_message",
+                                            "message": "保留前言\n<INSTRUCTIONS>\n不完整规则"}},
+        ]
+        self.path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf-8")
+        messages = bridge.excerpt(self.args(query=None, last=2, context=0, max_chars=1000), self.home)["messages"]
+        self.assertEqual([(message["text"], message["injected"]) for message in messages],
+                         [("保留开头\n保留结尾", True), ("保留前言", True)])
+        self.assertEqual(bridge.excerpt(self.args(query="外层机密乙", context=0), self.home)["status"], "no_match")
+
+    def test_excerpt_marks_removed_standalone_header_in_multiline_message(self):
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({
+                "type": "response_item",
+                "payload": {"type": "message", "id": "header-only", "role": "user",
+                            "content": [{"type": "input_text",
+                                         "text": "聊天开头\n# AGENTS.md instructions\n聊天结尾"}]},
+            }, ensure_ascii=False) + "\n")
+        message = bridge.excerpt(self.args(query=None, messages=["header-only"], context=0), self.home)["messages"][0]
+        self.assertEqual(message["text"], "聊天开头\n聊天结尾")
+        self.assertTrue(message["injected"])
+
     def test_exact_source_unicode_hashes_and_traversal(self):
         project = self.root / "中文源码"
         project.mkdir()

@@ -15,7 +15,8 @@
 - 解析后的路径必须在所选 Codex 目录以内。首个可解析对象必须是 `session_meta`，其 `payload.id` 或缺省时的 `payload.session_id` 要与所请求 UUID 一致；依据 `payload.cwd` 可补充来源。路径越界或身份不匹配的文件不会作为已核实来源。
 - 首选 `type=response_item` 且 `payload.type=message` 的记录；只取 `payload.role` 为 `user` 或 `assistant` 的消息。若 `payload.channel` 或 `payload.phase` 为 `analysis`，跳过。正文来自 `payload.content` 中 `input_text`、`output_text` 和 `text` 类型块的字符串 `text`；保留顶层 `timestamp`、原始行号和消息 ID，并按 ID 去重。
 - 旧记录：同一角色没有首选格式时，回退到 `type=event_msg` 中 `payload.type` 为 `user_message` / `agent_message` 的 `payload.message` 字符串。
-- 系统/开发者消息、工具输出和推理记录不作为正文。移除可见文本里的 `environment_context`、`external_codex_apps_open_page` 和 `INSTRUCTIONS` 成对块，以及独立成行的 `# AGENTS.md instructions` 头；移除后仍有正文的消息带 `injected: true` 标记，整条只剩注入内容的消息不输出。输出不会自动把可见文本里的个人信息或凭据替换掉。
+- 系统和开发者消息、工具输出和推理记录不作为正文。聊天中位于 Markdown 代码围栏外的独立规则标题 `# AGENTS.md instructions`，以及单独成行的 `environment_context`、`external_codex_apps_open_page` 和 `INSTRUCTIONS` 包裹块会被移除。同一标签可以嵌套。若已识别的开标签缺少对应闭标签，跳过该消息的剩余文字。
+- 常见代码围栏内的示例和行内代码中的标签照常保留。新旧消息格式都使用同一规则。只要实际移除了内容且消息仍有正文，结果就带 `injected: true`。输出中的个人信息或凭据需由分享者检查。
 
 ## 结果及兼容性
 

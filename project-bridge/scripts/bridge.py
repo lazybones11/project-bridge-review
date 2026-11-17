@@ -139,15 +139,47 @@ def text_blocks(payload):
                      and isinstance(block.get("text"), str))
 
 
-RUNTIME_BLOCK = re.compile(
-    r"<(environment_context|external_codex_apps_open_page|INSTRUCTIONS)>.*?</\1>", re.S)
-AGENTS_HEADER = re.compile(r"^\s*#\s*AGENTS\.md\s+instructions\s*$", re.IGNORECASE)
+RUNTIME_TAGS = r"environment_context|external_codex_apps_open_page|INSTRUCTIONS"
+RUNTIME_TAG_LINE = re.compile(rf" {{0,3}}<(/?)({RUNTIME_TAGS})>[ \t]*")
+RUNTIME_BLOCK_LINE = re.compile(rf" {{0,3}}<({RUNTIME_TAGS})>(?:(?!</\1>).)*</\1>[ \t]*")
+AGENTS_HEADER = re.compile(r" {0,3}#[ \t]*AGENTS\.md[ \t]+instructions[ \t]*", re.IGNORECASE)
+MARKDOWN_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 
 
 def clean_runtime_blocks(content):
-    stripped = RUNTIME_BLOCK.sub("", content)
-    # A residual wrapper header line (e.g. "# AGENTS.md instructions") is scaffolding, not chat.
-    return "\n".join(line for line in stripped.splitlines() if not AGENTS_HEADER.match(line)).strip()
+    """Return the visible text and whether any runtime markup was removed."""
+    kept = []
+    injected = False
+    block = None
+    depth = 0
+    fence = None
+    for line in content.splitlines(keepends=True):
+        text = line.rstrip("\r\n")
+        marker = MARKDOWN_FENCE.fullmatch(text)
+        if fence is not None:
+            if marker and marker[1].startswith(fence) and not marker[2].strip(" \t"):
+                fence = None
+        elif marker and (marker[1][0] == "~" or "`" not in marker[2]):
+            fence = marker[1]
+        else:
+            tag = RUNTIME_TAG_LINE.fullmatch(text)
+            if block is not None:
+                if tag and tag[2] == block:
+                    depth += -1 if tag[1] else 1
+                    if depth == 0:
+                        block = None
+                continue
+            if tag and not tag[1]:
+                block = tag[2]
+                depth = 1
+                injected = True
+                continue
+            if AGENTS_HEADER.fullmatch(text) or RUNTIME_BLOCK_LINE.fullmatch(text):
+                injected = True
+                continue
+        if block is None:
+            kept.append(line)
+    return "".join(kept).strip(), injected
 
 
 def visible_messages(path, diagnostics=None):
@@ -160,10 +192,7 @@ def visible_messages(path, diagnostics=None):
             role = payload.get("role")
             if role not in ("user", "assistant") or payload.get("channel") == "analysis" or payload.get("phase") == "analysis":
                 continue
-            raw = text_blocks(payload)
-            injected = bool(RUNTIME_BLOCK.search(raw)) or bool(AGENTS_HEADER.search(raw))
-            # Runtime blocks are not conversation material; never export base instructions.
-            content = clean_runtime_blocks(raw)
+            content, injected = clean_runtime_blocks(text_blocks(payload))
             if not content:
                 continue
             message_id = payload.get("id") or f"line-{line}"
@@ -175,8 +204,7 @@ def visible_messages(path, diagnostics=None):
         elif row.get("type") == "event_msg" and payload.get("type") in ("user_message", "agent_message"):
             raw = payload.get("message")
             if isinstance(raw, str) and raw.strip():
-                injected = bool(RUNTIME_BLOCK.search(raw)) or bool(AGENTS_HEADER.search(raw))
-                content = clean_runtime_blocks(raw)
+                content, injected = clean_runtime_blocks(raw)
                 if not content:
                     continue
                 legacy.append({"message_id": f"line-{line}",
