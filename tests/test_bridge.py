@@ -253,6 +253,26 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(message["text"], "聊天开头\n聊天结尾")
         self.assertTrue(message["injected"])
 
+    def test_excerpt_removes_agent_headers_with_absolute_paths(self):
+        kept = ("# AGENTS.md instructions for contributors\n"
+                "~~~md\n# AGENTS.md instructions for /sample/preserved\n~~~\n"
+                "用户正文")
+        text = (r"# AGENTS.md instructions for C:\Sample Workspace\Demo" + "\n"
+                r"# AGENTS.md instructions for \\sample-server\share\demo" + "\n"
+                "# AGENTS.md instructions for /sample/project\n"
+                "<INSTRUCTIONS>\n自动附加的规则\n</INSTRUCTIONS>\n" + kept)
+        row = {"type": "response_item",
+               "payload": {"type": "message", "id": "scoped-header", "role": "user",
+                           "content": [{"type": "input_text", "text": text}]}}
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+        result = bridge.excerpt(self.args(query=None, messages=["scoped-header"],
+                                          context=0, max_chars=1000), self.home)
+        self.assertEqual(result["messages"][0]["text"], kept)
+        self.assertTrue(result["messages"][0]["injected"])
+        hidden_query = bridge.excerpt(self.args(query="Sample Workspace", context=0), self.home)
+        self.assertEqual(hidden_query["status"], "no_match")
+
     def test_exact_source_unicode_hashes_and_traversal(self):
         project = self.root / "中文源码"
         project.mkdir()

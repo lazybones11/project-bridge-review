@@ -142,7 +142,11 @@ def text_blocks(payload):
 RUNTIME_TAGS = r"environment_context|external_codex_apps_open_page|INSTRUCTIONS"
 RUNTIME_TAG_LINE = re.compile(rf" {{0,3}}<(/?)({RUNTIME_TAGS})>[ \t]*")
 RUNTIME_BLOCK_LINE = re.compile(rf" {{0,3}}<({RUNTIME_TAGS})>(?:(?!</\1>).)*</\1>[ \t]*")
-AGENTS_HEADER = re.compile(r" {0,3}#[ \t]*AGENTS\.md[ \t]+instructions[ \t]*", re.IGNORECASE)
+AGENTS_HEADER = re.compile(
+    r" {0,3}#[ \t]*AGENTS\.md[ \t]+instructions"
+    r"(?:[ \t]+for[ \t]+(?:[A-Z]:[\\/]|\\\\|/)[^\r\n]*)?[ \t]*",
+    re.IGNORECASE,
+)
 MARKDOWN_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 
 
